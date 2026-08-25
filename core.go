@@ -30,7 +30,7 @@ func Version() string {
 // VersionStatement returns a list of strings representing the full version info.
 func VersionStatement() []string {
 	return []string{
-		serial.Concat("infinite-core ", Version(), " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
+		serial.Concat("Infinite-core ", Version(), " (", runtime.Version(), " ", runtime.GOOS, "/", runtime.GOARCH, ")"),
 	}
 }
 
