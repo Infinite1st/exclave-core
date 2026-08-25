@@ -376,7 +376,7 @@ func (s *Instance) Start() error {
 		}
 	}
 
-	newError("Exclave-core ", Version(), " started").AtWarning().WriteToLog()
+	newError("Infinite-core ", Version(), " started").AtWarning().WriteToLog()
 
 	return nil
 }
