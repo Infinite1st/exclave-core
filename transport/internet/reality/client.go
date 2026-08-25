@@ -123,9 +123,9 @@ func UClient(ctx context.Context, conn net.Conn, dest net.Destination, config *C
 	}
 	hello.SessionId = make([]byte, 32)
 	copy(hello.Raw[39:], hello.SessionId) // the fixed location of `Session ID`
-	hello.SessionId[0] = 25               // Version_x
-	hello.SessionId[1] = 5                // Version_y
-	hello.SessionId[2] = 16               // Version_z
+	hello.SessionId[0] = 26               // Version_x
+	hello.SessionId[1] = 3                // Version_y
+	hello.SessionId[2] = 27               // Version_z
 	hello.SessionId[3] = 0                // reserved
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], config.ShortId)
