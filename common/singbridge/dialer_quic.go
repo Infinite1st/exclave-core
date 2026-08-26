@@ -11,11 +11,12 @@ import (
 )
 
 var (
-	_ net.Conn       = (*noSyscallConn)(nil)
-	_ net.PacketConn = (*quicCapableConn)(nil)
-	_ net.Conn       = (*quicCapableConn)(nil)
-	_ syscall.Conn   = (*quicCapableConn)(nil)
-	_ batchReader    = (*quicCapableConn)(nil)
+	_ net.Conn        = (*noSyscallConn)(nil)
+	_ net.PacketConn  = (*quicCapableConn)(nil)
+	_ net.Conn        = (*quicCapableConn)(nil)
+	_ syscall.Conn    = (*quicCapableConn)(nil)
+	_ batchReader     = (*quicCapableConn)(nil)
+	_ ioActivityFuncs = (*quicCapableConn)(nil)
 )
 
 // FIXME: add method for internet.Dialer to create a connect() socket instead of converting a bind() socket to a connect() socket
@@ -86,6 +87,16 @@ func newQUICConnectPacketConn(conn net.Conn) net.Conn {
 	} else {
 		quicCapableConn.readBatch = ipv4.NewPacketConn(quicCapableConn).ReadBatch
 	}
+	if readCounter != nil {
+		quicCapableConn.onRead = func(size int) {
+			readCounter.Add(int64(size))
+		}
+	}
+	if writeCounter != nil {
+		quicCapableConn.onWrite = func(size int) {
+			writeCounter.Add(int64(size))
+		}
+	}
 	return quicCapableConn
 }
 
@@ -101,6 +112,8 @@ type quicCapableConn struct {
 	read        func(b []byte) (int, error)
 	write       func(b []byte) (int, error)
 	remoteAddr  func() net.Addr
+	onRead      func(size int)
+	onWrite     func(size int)
 }
 
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L249
@@ -142,12 +155,23 @@ func (c *quicCapableConn) SyscallConn() (syscall.RawConn, error) {
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L309-L316
 func (c *quicCapableConn) ReadBatch(ms []ipv4.Message, flags int) (int, error) {
 	n, err := c.readBatch(ms, flags)
-	if c.readCounter != nil {
+	// onRead is used
+	/*if c.readCounter != nil {
 		c.readCounter.Add(int64(n))
-	}
+	}*/
 	return n, err
 }
 
 type batchReader interface {
 	ReadBatch(ms []ipv4.Message, flags int) (int, error)
+}
+
+// https://github.com/SagerNet/quic-go/blob/eb58c34e762a0fe39f6f4c1fac9aa17e98236915/sys_conn_oob.go#L277
+// https://github.com/SagerNet/quic-go/blob/eb58c34e762a0fe39f6f4c1fac9aa17e98236915/sys_conn_oob.go#L348
+func (c *quicCapableConn) IOActivityFuncs() (func(size int), func(size int)) {
+	return c.onRead, c.onWrite
+}
+
+type ioActivityFuncs interface {
+	IOActivityFuncs() (func(size int), func(size int))
 }
