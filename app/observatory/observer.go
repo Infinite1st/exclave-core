@@ -104,7 +104,15 @@ func (o *Observer) background(ctx context.Context) {
 
 		outbounds := hs.Select(o.config.SubjectSelector)
 
-		o.updateStatus(outbounds)
+		if len(outbounds) == 0 {
+			newError(o.ctx, "no outbound matches subjectSelector ", o.config.SubjectSelector).WriteToLog()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(sleepTime):
+			}
+			continue
+		}
 
 		if !o.config.EnableConcurrency {
 			sort.Strings(outbounds)
@@ -151,13 +159,6 @@ func (o *Observer) background(ctx context.Context) {
 		case <-time.After(sleepTime):
 		}
 	}
-}
-
-func (o *Observer) updateStatus(outbounds []string) {
-	o.statusLock.Lock()
-	defer o.statusLock.Unlock()
-	// TODO should remove old inbound that is removed
-	_ = outbounds
 }
 
 func (o *Observer) probe(ctx context.Context, outbound string) ProbeResult {
