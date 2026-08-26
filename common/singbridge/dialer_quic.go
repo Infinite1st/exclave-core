@@ -1,22 +1,26 @@
 package singbridge
 
 import (
+	"io"
+	"net"
 	"syscall"
 
+	"github.com/sagernet/sing/common/network"
 	"golang.org/x/net/ipv4"
 
-	"github.com/exclavenetwork/exclave-core/v5/common/net"
 	"github.com/exclavenetwork/exclave-core/v5/features/stats"
 	"github.com/exclavenetwork/exclave-core/v5/transport/internet"
 )
 
 var (
-	_ net.Conn        = (*noSyscallConn)(nil)
-	_ net.PacketConn  = (*quicCapableConn)(nil)
-	_ net.Conn        = (*quicCapableConn)(nil)
-	_ syscall.Conn    = (*quicCapableConn)(nil)
-	_ batchReader     = (*quicCapableConn)(nil)
-	_ ioActivityFuncs = (*quicCapableConn)(nil)
+	_ net.Conn             = (*noSyscallConn)(nil)
+	_ net.Conn             = (*quicCapableConn)(nil)
+	_ net.PacketConn       = (*quicCapableConn)(nil)
+	_ syscall.Conn         = (*quicCapableConn)(nil)
+	_ batchReader          = (*quicCapableConn)(nil)
+	_ ioActivityFuncs      = (*quicCapableConn)(nil)
+	_ network.ReadCounter  = (*quicCapableCounterConn)(nil)
+	_ network.WriteCounter = (*quicCapableCounterConn)(nil)
 )
 
 // FIXME: add method for internet.Dialer to create a connect() socket instead of converting a bind() socket to a connect() socket
@@ -56,6 +60,10 @@ func newQUICConnectPacketConn(conn net.Conn) net.Conn {
 		}
 		return &noSyscallConn{Conn: conn}
 	}
+	syscallConn, err := packetConn.(syscall.Conn).SyscallConn()
+	if err != nil {
+		return &noSyscallConn{Conn: conn}
+	}
 	if supportOOB {
 		// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L496
 		// connect() socket required
@@ -63,41 +71,35 @@ func newQUICConnectPacketConn(conn net.Conn) net.Conn {
 		if !ok {
 			return &noSyscallConn{Conn: conn}
 		}
-		syscallConn, err := packetConn.(syscall.Conn).SyscallConn()
-		if err != nil {
-			return &noSyscallConn{Conn: conn}
-		}
 		if err := connect(syscallConn, addr); err != nil {
 			return &noSyscallConn{Conn: conn}
 		}
 	}
 	quicCapableConn := &quicCapableConn{
-		statCounterPacketConn: &statCounterPacketConn{
-			PacketConn:   packetConn,
-			readCounter:  readCounter,
-			writeCounter: writeCounter,
+		Conn:         conn,
+		packetConn:   packetConn,
+		syscallConn:  syscallConn,
+		readCounter:  readCounter,
+		writeCounter: writeCounter,
+		onRead: func(size int) {
+			if readCounter != nil {
+				readCounter.Add(int64(size))
+			}
 		},
-		syscallConn: packetConn.(syscall.Conn).SyscallConn,
-		read:        conn.Read,
-		write:       conn.Write,
-		remoteAddr:  conn.RemoteAddr,
+		onWrite: func(size int) {
+			if writeCounter != nil {
+				writeCounter.Add(int64(size))
+			}
+		},
 	}
 	if batchReader, ok := packetConn.(batchReader); ok {
 		quicCapableConn.readBatch = batchReader.ReadBatch
 	} else {
 		quicCapableConn.readBatch = ipv4.NewPacketConn(quicCapableConn).ReadBatch
 	}
-	if readCounter != nil {
-		quicCapableConn.onRead = func(size int) {
-			readCounter.Add(int64(size))
-		}
+	return &quicCapableCounterConn{
+		quicCapableConn: quicCapableConn,
 	}
-	if writeCounter != nil {
-		quicCapableConn.onWrite = func(size int) {
-			writeCounter.Add(int64(size))
-		}
-	}
-	return quicCapableConn
 }
 
 // noSyscallConn must NOT implement syscall.Conn
@@ -106,64 +108,48 @@ type noSyscallConn struct {
 }
 
 type quicCapableConn struct {
-	*statCounterPacketConn
-	syscallConn func() (syscall.RawConn, error)
-	readBatch   func(ms []ipv4.Message, flags int) (int, error)
-	read        func(b []byte) (int, error)
-	write       func(b []byte) (int, error)
-	remoteAddr  func() net.Addr
-	onRead      func(size int)
-	onWrite     func(size int)
+	net.Conn
+	packetConn   net.PacketConn
+	syscallConn  syscall.RawConn
+	readBatch    func(ms []ipv4.Message, flags int) (int, error)
+	readCounter  stats.Counter
+	writeCounter stats.Counter
+	onRead       func(size int)
+	onWrite      func(size int)
 }
 
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L249
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L315
-// https://github.com/golang/net/blob/f6c404bf8371cea2a96e5bf2075b6f5a3b06657c/ipv4/endpoint.go#L103
-func (c *quicCapableConn) Read(b []byte) (int, error) {
-	n, err := c.read(b)
-	if c.readCounter != nil {
-		c.readCounter.Add(int64(n))
-	}
+func (c *quicCapableConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, addr, err := c.packetConn.ReadFrom(p)
+	c.onRead(n)
+	return n, addr, err
+}
+
+func (c *quicCapableConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	n, err := c.packetConn.WriteTo(p, addr)
+	c.onWrite(n)
 	return n, err
-}
-
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L249
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L315
-// https://github.com/golang/net/blob/f6c404bf8371cea2a96e5bf2075b6f5a3b06657c/ipv4/endpoint.go#L103
-func (c *quicCapableConn) Write(b []byte) (int, error) {
-	n, err := c.write(b)
-	if c.writeCounter != nil {
-		c.writeCounter.Add(int64(n))
-	}
-	return n, err
-}
-
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L249
-// https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L315
-// https://github.com/golang/net/blob/f6c404bf8371cea2a96e5bf2075b6f5a3b06657c/ipv4/endpoint.go#L103
-func (c *quicCapableConn) RemoteAddr() net.Addr {
-	return c.remoteAddr()
 }
 
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn.go#L54
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn.go#L90
 func (c *quicCapableConn) SyscallConn() (syscall.RawConn, error) {
-	return c.syscallConn()
+	return c.syscallConn, nil
+}
+
+type batchReader interface {
+	ReadBatch(ms []ipv4.Message, flags int) (int, error)
 }
 
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L243-L250
 // https://github.com/SagerNet/quic-go/blob/acafdc7599d1238495def470f7077b3212903b1f/sys_conn_oob.go#L309-L316
 func (c *quicCapableConn) ReadBatch(ms []ipv4.Message, flags int) (int, error) {
-	n, err := c.readBatch(ms, flags)
 	// onRead is used
-	/*if c.readCounter != nil {
-		c.readCounter.Add(int64(n))
-	}*/
-	return n, err
+	// https://github.com/SagerNet/quic-go/blob/eb58c34e762a0fe39f6f4c1fac9aa17e98236915/sys_conn_oob.go#L380-L386
+	return c.readBatch(ms, flags)
 }
 
-type batchReader interface {
-	ReadBatch(ms []ipv4.Message, flags int) (int, error)
+type ioActivityFuncs interface {
+	IOActivityFuncs() (func(size int), func(size int))
 }
 
 // https://github.com/SagerNet/quic-go/blob/eb58c34e762a0fe39f6f4c1fac9aa17e98236915/sys_conn_oob.go#L277
@@ -172,6 +158,26 @@ func (c *quicCapableConn) IOActivityFuncs() (func(size int), func(size int)) {
 	return c.onRead, c.onWrite
 }
 
-type ioActivityFuncs interface {
-	IOActivityFuncs() (func(size int), func(size int))
+type quicCapableCounterConn struct {
+	*quicCapableConn
+}
+
+// https://github.com/SagerNet/sing-quic/blob/06fb2e6b0c958aece20bd601ca42167c932673a2/quic.go#L127
+// https://github.com/SagerNet/sing/blob/3f8f790b7a2968307bbf900544fc8030791c715e/common/network/counter.go#L33
+func (c *quicCapableCounterConn) UnwrapReader() (io.Reader, []network.CountFunc) {
+	return c.quicCapableConn, []network.CountFunc{func(n int64) {
+		if c.readCounter != nil {
+			c.readCounter.Add(n)
+		}
+	}}
+}
+
+// https://github.com/SagerNet/sing-quic/blob/06fb2e6b0c958aece20bd601ca42167c932673a2/quic.go#L132
+// https://github.com/SagerNet/sing/blob/3f8f790b7a2968307bbf900544fc8030791c715e/common/network/counter.go#L54
+func (c *quicCapableCounterConn) UnwrapWriter() (io.Writer, []network.CountFunc) {
+	return c.quicCapableConn, []network.CountFunc{func(n int64) {
+		if c.writeCounter != nil {
+			c.writeCounter.Add(n)
+		}
+	}}
 }

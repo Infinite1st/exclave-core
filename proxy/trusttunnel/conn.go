@@ -205,8 +205,8 @@ func (c *oobConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (int, int, error
 // https://github.com/quic-go/quic-go/blob/cea2e60cea0e3ce5248d1ec2003c0a2b73051547/sys_conn_oob.go#L109-L114
 func (c *oobConn) ReadBatch(ms []ipv4.Message, flags int) (int, error) {
 	n, err := c.readBatch(ms, flags)
-	if c.readCounter != nil {
-		c.readCounter.Add(int64(n))
+	for i := range n {
+		c.readCounter.Add(int64(ms[i].N))
 	}
 	return n, err
 }
