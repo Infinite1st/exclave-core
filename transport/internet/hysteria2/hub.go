@@ -88,10 +88,11 @@ func Listen(ctx context.Context, address net.Address, port net.Port, streamSetti
 	}
 
 	hyConfig := &hyServer.Config{
-		Conn:           rawConn,
-		TLSConfig:      tlsConfig,
-		DisableUDP:     !config.GetUseUdpExtension(),
-		StreamHijacker: listener.StreamHijacker, // acceptStreams
+		Conn:                  rawConn,
+		TLSConfig:             tlsConfig,
+		DisableStatelessReset: config.DisableStatelessReset,
+		DisableUDP:            !config.GetUseUdpExtension(),
+		StreamHijacker:        listener.StreamHijacker, // acceptStreams
 		BandwidthConfig: hyServer.BandwidthConfig{
 			MaxTx:                   config.Congestion.GetUpMbps() * MBps,
 			MaxRx:                   config.GetCongestion().GetDownMbps() * MBps,
