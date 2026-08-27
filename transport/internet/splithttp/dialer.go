@@ -64,7 +64,7 @@ func (t *transportConnectionState) Close() error {
 	t.scopedDialerAccess.Lock()
 	for _, manager := range t.scopedDialerMap {
 		for _, client := range manager.xmuxClients {
-			if c, ok := client.XmuxConn.(*DefaultDialerClient); ok && !c.closed {
+			if c, ok := client.XmuxConn.(*DefaultDialerClient); ok && !c.closed.Load() {
 				c.client.CloseIdleConnections()
 			}
 		}
@@ -563,11 +563,12 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 	writed := 0
 
 	for _, buff := range buffer.MultiBuffer {
+		n := int(buff.Len())
 		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
 		if err != nil {
 			return writed, err
 		}
-		writed += int(buff.Len())
+		writed += n
 	}
 	return writed, nil
 }
