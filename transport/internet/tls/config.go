@@ -363,7 +363,12 @@ func (c *Config) getTLSConfig(ctx context.Context, hasCtx bool, opts ...Option) 
 				}
 			}
 			if c.PinnedPeerCertificatePublicKeySha256 != nil {
-				hash := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+				var hash [32]byte
+				if publicKey, err := x509.MarshalPKIXPublicKey(state.PeerCertificates[0].PublicKey); err == nil {
+					hash = sha256.Sum256(publicKey)
+				} else {
+					hash = sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+				}
 				if !slices.ContainsFunc(c.PinnedPeerCertificatePublicKeySha256, func(b []byte) bool {
 					return hmac.Equal(b, hash[:])
 				}) {

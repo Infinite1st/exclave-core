@@ -41,7 +41,12 @@ func CalculatePEMCertPublicKeySHA256Hash(certContent []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	var hash [32]byte
+	if publicKey, err := x509.MarshalPKIXPublicKey(cert.PublicKey); err == nil {
+		hash = sha256.Sum256(publicKey)
+	} else {
+		hash = sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	}
 	return base64.StdEncoding.EncodeToString(hash[:]), nil
 }
 

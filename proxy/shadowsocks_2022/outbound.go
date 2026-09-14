@@ -3,7 +3,6 @@ package shadowsocks_2022 // nolint:stylecheck
 import (
 	"context"
 	"strconv"
-	"time"
 
 	shadowsocks "github.com/sagernet/sing-shadowsocks2"
 	"github.com/sagernet/sing-shadowsocks2/cipher"
@@ -141,6 +140,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	if err != nil {
 		return newError("failed to connect to server").Base(err)
 	}
+	defer connection.Close()
 
 	if network == net.Network_TCP {
 		if o.streamPlugin != nil {
@@ -149,7 +149,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 		serverConn := o.method.DialEarlyConn(connection, singbridge.ToSocksAddr(destination))
 		var handshake bool
 		if timeoutReader, isTimeoutReader := link.Reader.(buf.TimeoutReader); isTimeoutReader {
-			mb, err := timeoutReader.ReadMultiBufferTimeout(time.Millisecond * 100)
+			mb, err := timeoutReader.ReadMultiBufferTimeout(proxy.FirstPayloadTimeout)
 			if err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
 				return newError("read payload").Base(err)
 			}
