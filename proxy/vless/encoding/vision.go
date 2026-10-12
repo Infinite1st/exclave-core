@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"strconv"
 
-	goreality "github.com/metacubex/utls"
+	goreality "github.com/exclavenetwork/reality"
 	"github.com/pires/go-proxyproto"
 
 	"github.com/exclavenetwork/exclave-core/v5/common/buf"
@@ -127,13 +127,13 @@ type VisionReader struct {
 	isUplink     bool
 	conn         net.Conn
 	input        *bytes.Reader
-	rawInput     **bytes.Buffer
+	rawInput     *bytes.Buffer
 
 	// internal
 	directReadCounter stats.Counter
 }
 
-func NewVisionReader(reader buf.Reader, trafficState *TrafficState, isUplink bool, ctx context.Context, conn net.Conn, input *bytes.Reader, rawInput **bytes.Buffer) *VisionReader {
+func NewVisionReader(reader buf.Reader, trafficState *TrafficState, isUplink bool, ctx context.Context, conn net.Conn, input *bytes.Reader, rawInput *bytes.Buffer) *VisionReader {
 	return &VisionReader{
 		Reader:       reader,
 		trafficState: trafficState,
@@ -206,7 +206,7 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		if inputBuffer, err := buf.ReadFrom(w.input); err == nil && !inputBuffer.IsEmpty() {
 			buffer, _ = buf.MergeMulti(buffer, inputBuffer)
 		}
-		rawInput := *w.rawInput
+		rawInput := w.rawInput
 		if rawInput != nil {
 			if rawInputBuffer, err := buf.ReadFrom(rawInput); err == nil && !rawInputBuffer.IsEmpty() {
 				buffer, _ = buf.MergeMulti(buffer, rawInputBuffer)
@@ -220,7 +220,7 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 			// rawInputPool.Put(rawInput)
 			rawInput = nil
 		}
-
+		suppressOuterCloseNotify(w.conn)
 		readerConn, readCounter, _ := UnwrapRawConn(w.conn)
 		w.directReadCounter = readCounter
 		w.Reader = buf.NewReader(readerConn)
@@ -267,6 +267,7 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	}
 
 	if *switchToDirectCopy {
+		suppressOuterCloseNotify(w.conn)
 		rawConn, _, writerCounter := UnwrapRawConn(w.conn)
 		w.Writer = buf.NewWriter(rawConn)
 		w.directWriteCounter = writerCounter
@@ -627,4 +628,20 @@ func UnwrapRawConn(conn net.Conn) (net.Conn, stats.Counter, stats.Counter) {
 		}
 	}
 	return conn, readCounter, writerCounter
+}
+
+type CloseNotifySuppressor interface {
+	SuppressCloseNotify()
+}
+
+// Close our local TLS conn instance might send a incorrect close_notify alert
+// if the XTLS direct copy mode is enabled and cause TLS BAD_RECORD_MAC on users' browser
+// Close the underlying connection directly to avoid this issue.
+func suppressOuterCloseNotify(conn net.Conn) {
+	if statConn, ok := conn.(*internet.StatCouterConnection); ok {
+		conn = statConn.Connection
+	}
+	if suppressor, ok := conn.(CloseNotifySuppressor); ok {
+		suppressor.SuppressCloseNotify()
+	}
 }

@@ -173,7 +173,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if err != nil {
 		return newError("failed to find an available destination").Base(err).AtWarning()
 	}
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+	}()
 
 	iConn := conn
 	if statConn, ok := iConn.(*internet.StatCouterConnection); ok {
@@ -189,10 +191,11 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	newError("tunneling request to ", target, " via ", rec.Destination().NetAddr()).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
 	if h.encryption != nil {
-		var err error
-		if conn, err = h.encryption.Handshake(conn); err != nil {
+		encryptionConn, err := h.encryption.Handshake(conn)
+		if err != nil {
 			return newError("ML-KEM-768 handshake failed").Base(err).AtInfo()
 		}
+		conn = encryptionConn
 	}
 
 	command := protocol.RequestCommandTCP
@@ -218,7 +221,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	}
 
 	var input *bytes.Reader
-	var rawInput **bytes.Buffer
+	var rawInput *bytes.Buffer
 	allowUDP443 := false
 	switch requestAddons.Flow {
 	case vless.XRV + "-udp443":
@@ -247,6 +250,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 				case utls.UTLSClientConnection:
 					t = reflect.TypeOf(c.Conn).Elem()
 					p = unsafe.Pointer(c.Conn)
+				case *reality.Conn:
+					t = reflect.TypeOf(c.Conn).Elem()
+					p = unsafe.Pointer(c.Conn)
 				case *reality.UConn:
 					t = reflect.TypeOf(c.Conn).Elem()
 					p = unsafe.Pointer(c.Conn)
@@ -259,10 +265,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			input = (*bytes.Reader)(unsafe.Add(p, i.Offset))
 			switch r.Type.Kind() {
 			case reflect.Struct:
-				buffer := (*bytes.Buffer)(unsafe.Add(p, r.Offset))
-				rawInput = &buffer
+				rawInput = (*bytes.Buffer)(unsafe.Add(p, r.Offset))
 			case reflect.Pointer:
-				rawInput = (**bytes.Buffer)(unsafe.Add(p, r.Offset))
+				rawInput = *(**bytes.Buffer)(unsafe.Add(p, r.Offset))
 			}
 		}
 	}

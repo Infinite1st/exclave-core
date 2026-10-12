@@ -14,7 +14,7 @@ import (
 	"time"
 	"unsafe"
 
-	goreality "github.com/metacubex/utls"
+	goreality "github.com/exclavenetwork/reality"
 	"github.com/pires/go-proxyproto"
 
 	core "github.com/exclavenetwork/exclave-core/v5"
@@ -248,10 +248,11 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 	}
 
 	if h.decryption != nil {
-		var err error
-		if connection, err = h.decryption.Handshake(connection, nil); err != nil {
+		decryptionConn, err := h.decryption.Handshake(connection, nil)
+		if err != nil {
 			return newError("ML-KEM-768 handshake failed").Base(err).AtInfo()
 		}
+		connection = decryptionConn
 	}
 
 	first := buf.FromBytes(make([]byte, buf.Size))
@@ -442,7 +443,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 	responseAddons := &encoding.Addons{}
 
 	var input *bytes.Reader
-	var rawInput **bytes.Buffer
+	var rawInput *bytes.Buffer
 	if requestAddons.Flow == vless.XRV {
 		if account := request.User.Account.(*vless.MemoryAccount); account.Flow == requestAddons.Flow {
 			switch request.Command {
@@ -485,10 +486,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 				input = (*bytes.Reader)(unsafe.Add(p, i.Offset))
 				switch r.Type.Kind() {
 				case reflect.Struct:
-					buffer := (*bytes.Buffer)(unsafe.Add(p, r.Offset))
-					rawInput = &buffer
+					rawInput = (*bytes.Buffer)(unsafe.Add(p, r.Offset))
 				case reflect.Pointer:
-					rawInput = (**bytes.Buffer)(unsafe.Add(p, r.Offset))
+					rawInput = *(**bytes.Buffer)(unsafe.Add(p, r.Offset))
 				}
 			}
 		} else {

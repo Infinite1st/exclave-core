@@ -193,9 +193,19 @@ func (f *connFactory) New(addr net.Addr) (net.PacketConn, error) {
 	}
 	switch {
 	case f.salamanderPassword != nil:
-		return obfs.WrapPacketConnSalamander(conn, f.salamanderPassword)
+		obfsConn, err := obfs.WrapPacketConnSalamander(conn, f.salamanderPassword)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return obfsConn, nil
 	case f.geckoOpts != nil:
-		return obfs.WrapPacketConnGecko(conn, *f.geckoOpts)
+		obfsConn, err := obfs.WrapPacketConnGecko(conn, *f.geckoOpts)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return obfsConn, nil
 	default:
 		return conn, nil
 	}
@@ -422,7 +432,7 @@ func GetHyClient(ctx context.Context, dest net.Destination, streamSettings *inte
 		CloseHyClient(stateTyped, dest, streamSettings)
 	}
 	client, found := stateTyped.scopedDialerMap[dialerConf{dest, streamSettings}]
-	if found {
+	if found && !client.closed {
 		return client, canceller, nil
 	}
 	client = &lateInitHysteriaClient{
