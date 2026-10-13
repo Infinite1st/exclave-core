@@ -1,4 +1,12 @@
-Reality version code fix
+# Infinite1st/exclave-core
+
+Patched fork of [ExclaveNetwork/exclave-core](https://github.com/ExclaveNetwork/exclave-core).
+
+## Changes from upstream
+
+- Reality version code changed from 25.5.16 to 26.3.27
+- utls fingerprint updated to Chrome 155
+
 ## License
 
     Copyright (C) 2023  dyhkwong
