@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -36,16 +37,18 @@ var (
 )
 
 type Client struct {
-	serverAddress   net.Destination
-	config          *ClientConfig
-	policyManager   policy.Manager
-	quicConfig      *quic.Config
-	transport       *http3.Transport
-	cachedConnMutex sync.Mutex
-	cachedConn      *http3.ClientConn
-	createLock      sync.Mutex
-	connectUDP      bool
-	uriTemplate     *uritemplate.Template
+	serverAddress net.Destination
+	config        *ClientConfig
+	policyManager policy.Manager
+	quicConfig    *quic.Config
+	transport     *http3.Transport
+	cachedConn    atomic.Pointer[http3.ClientConn]
+	createLock    sync.Mutex
+	connectUDP    bool
+	uriTemplate   *uritemplate.Template
+	ctxLock       sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 func (c *Client) InterfaceUpdate() {
@@ -53,12 +56,14 @@ func (c *Client) InterfaceUpdate() {
 }
 
 func (c *Client) Close() error {
-	c.cachedConnMutex.Lock()
-	if c.cachedConn != nil {
-		c.cachedConn.CloseWithError(0, "")
-		c.cachedConn = nil
+	c.ctxLock.Lock()
+	c.cancel()
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.ctxLock.Unlock()
+	cachedConn := c.cachedConn.Swap(nil)
+	if cachedConn != nil {
+		cachedConn.CloseWithError(0, "")
 	}
-	c.cachedConnMutex.Unlock()
 	return nil
 }
 
@@ -99,6 +104,7 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
 			return nil, err
 		}
 	}
+	client.ctx, client.cancel = context.WithCancel(context.Background())
 	return client, nil
 }
 
@@ -142,28 +148,43 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	ctx, cancel := context.WithCancel(ctx)
 	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
 
+	var writer buf.Writer
+	var reader buf.Reader
+	if target.Network == net.Network_TCP {
+		writer = buf.NewWriter(conn)
+		reader = buf.NewReader(conn)
+	} else if _, ok := conn.(*http3PacketConn); ok {
+		readerWriter := newDatagramReaderWriter(conn, target, func(dest net.Destination) (net.Conn, error) {
+			conn, err := c.setupHTTPTunnel(ctx, dest, dialer, nil)
+			if err != nil {
+				return nil, err
+			}
+			newError("tunneling request to ", dest, " via ", c.serverAddress.NetAddr()).WriteToLog(session.ExportIDToError(ctx))
+			return conn, nil
+		})
+		defer readerWriter.close()
+		writer = readerWriter
+		reader = readerWriter
+	} else {
+		readerWriter := newUoTReaderWriter(conn, target, func(dest net.Destination) (net.Conn, error) {
+			conn, err := c.setupHTTPTunnel(ctx, dest, dialer, nil)
+			if err != nil {
+				return nil, err
+			}
+			newError("tunneling request to ", dest, " via ", c.serverAddress.NetAddr()).WriteToLog(session.ExportIDToError(ctx))
+			return conn, nil
+		})
+		defer readerWriter.close()
+		writer = readerWriter
+		reader = readerWriter
+	}
+
 	requestFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
-		var writer buf.Writer
-		if target.Network == net.Network_TCP {
-			writer = buf.NewWriter(conn)
-		} else if _, ok := conn.(*http3PacketConn); ok {
-			writer = newDatagramWriter(conn, target)
-		} else {
-			writer = newUoTWriter(conn, target)
-		}
 		return buf.Copy(link.Reader, writer, buf.UpdateActivity(timer))
 	}
 	responseFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.UplinkOnly)
-		var reader buf.Reader
-		if target.Network == net.Network_TCP {
-			reader = buf.NewReader(conn)
-		} else if _, ok := conn.(*http3PacketConn); ok {
-			reader = newDatagramReader(conn)
-		} else {
-			reader = newUoTReader(conn)
-		}
 		return buf.Copy(reader, link.Writer, buf.UpdateActivity(timer))
 	}
 
@@ -196,40 +217,41 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 		return nil, newError("tls not enabled")
 	}
 
-	detachedContext := core.ToBackgroundDetachedContext(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+	c.ctxLock.Lock()
+	stop := context.AfterFunc(c.ctx, cancel)
+	c.ctxLock.Unlock()
+	defer stop()
 
 	c.createLock.Lock()
-	c.cachedConnMutex.Lock()
-	clientConn := c.cachedConn
-	c.cachedConnMutex.Unlock()
+	clientConn := c.cachedConn.Load()
 	if clientConn != nil {
 		select {
 		case <-clientConn.Context().Done():
-			_ = clientConn.CloseWithError(0, "")
-			c.cachedConnMutex.Lock()
-			c.cachedConn = nil
-			c.cachedConnMutex.Unlock()
+			clientConn.CloseWithError(0, "")
+			clientConn = nil
 		default:
 		}
 	}
 	if clientConn == nil {
-		tlsCfg, err := tlsSettings.GetTLSConfigWithContext(detachedContext, v2tls.WithNextProto("h3"), v2tls.WithDestination(c.serverAddress))
+		tlsCfg, err := tlsSettings.GetTLSConfigWithContext(ctx, v2tls.WithNextProto("h3"), v2tls.WithDestination(c.serverAddress))
 		if err != nil {
+			c.createLock.Unlock()
 			return nil, err
 		}
-		rawConn, err := dialer.Dial(detachedContext, c.serverAddress)
+		rawConn, err := dialer.Dial(ctx, c.serverAddress)
 		if err != nil {
+			c.createLock.Unlock()
 			return nil, err
 		}
-		quicConn, err := quic.Dial(detachedContext, newQUICPacketConn(rawConn), rawConn.RemoteAddr(), tlsCfg, c.quicConfig)
+		quicConn, err := quic.Dial(ctx, newQUICPacketConn(rawConn), rawConn.RemoteAddr(), tlsCfg, c.quicConfig)
 		if err != nil {
 			rawConn.Close()
+			c.createLock.Unlock()
 			return nil, err
 		}
 		clientConn = c.transport.NewClientConn(quicConn)
-		c.cachedConnMutex.Lock()
-		c.cachedConn = clientConn
-		c.cachedConnMutex.Unlock()
+		c.cachedConn.Store(clientConn)
 	}
 	c.createLock.Unlock()
 
@@ -244,7 +266,7 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 		return nil, newError("extended connect not supported")
 	}
 
-	stream, err := clientConn.OpenRequestStream(detachedContext)
+	stream, err := clientConn.OpenRequestStream(ctx)
 	if err != nil {
 		clientConn.CloseWithError(0, "")
 		return nil, err
@@ -254,10 +276,7 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 	if target.Network == net.Network_TCP {
 		req = &http.Request{
 			Method: http.MethodConnect,
-			URL: &url.URL{
-				Scheme: "https",
-				Host:   target.NetAddr(),
-			},
+			URL:    &url.URL{Host: target.NetAddr()},
 			Header: make(http.Header),
 			Host:   target.NetAddr(),
 		}
@@ -297,6 +316,7 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+	req = req.WithContext(ctx)
 
 	if target.Network == net.Network_TCP {
 		if err := stream.SendRequestHeader(req); err != nil {
@@ -325,11 +345,11 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 			clientConn.CloseWithError(0, "")
 			return nil, pErr
 		}
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			resp.Body.Close()
 			stream.CancelRead(0)
 			stream.Close()
-			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
+			return nil, newError("Proxy responded with non 2xx code: " + resp.Status)
 		}
 		return &http3Conn{
 			stream: stream,
@@ -348,11 +368,11 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, target net.Destination, di
 			stream.Close()
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			resp.Body.Close()
 			stream.CancelRead(0)
 			stream.Close()
-			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
+			return nil, newError("Proxy responded with non 2xx code: " + resp.Status)
 		}
 		if clientConn.Settings().EnableDatagrams {
 			return &http3PacketConn{

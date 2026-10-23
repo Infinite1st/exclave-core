@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -55,14 +56,15 @@ func (c *Client) InterfaceUpdate() {
 
 func (c *Client) Close() error {
 	c.cachedH2Mutex.Lock()
-	for _, cachedH2Conn := range c.cachedH2Conns {
+	cachedH2Conns := maps.Values(c.cachedH2Conns)
+	clear(c.cachedH2Conns)
+	c.cachedH2Mutex.Unlock()
+	for cachedH2Conn := range cachedH2Conns {
 		for elem := cachedH2Conn.Front(); elem != nil; elem = elem.Next() {
 			_ = elem.Value.(*http2ClientConn).Close()
 			cachedH2Conn.Remove(elem)
 		}
 	}
-	clear(c.cachedH2Conns)
-	c.cachedH2Mutex.Unlock()
 	return nil
 }
 
@@ -168,19 +170,32 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	ctx, cancel := context.WithCancel(ctx)
 	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
 
+	var writer buf.Writer
+	var reader buf.Reader
+	if target.Network == net.Network_TCP {
+		writer = buf.NewWriter(conn)
+		reader = buf.NewReader(conn)
+	} else {
+		readerWriter := newUoTReaderWriter(conn, target, func(dest net.Destination) (net.Conn, error) {
+			conn, _, err := c.setupHTTPTunnel(ctx, server.Destination(), dest, user, dialer, nil, false)
+			if err != nil {
+				return nil, err
+			}
+			newError("tunneling request to ", dest, " via ", server.Destination().NetAddr()).WriteToLog(session.ExportIDToError(ctx))
+			return conn, nil
+		})
+		defer readerWriter.close()
+		writer = readerWriter
+		reader = readerWriter
+	}
+
 	requestFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
-		if target.Network == net.Network_UDP {
-			return buf.Copy(link.Reader, newUoTWriter(conn, target), buf.UpdateActivity(timer))
-		}
-		return buf.Copy(link.Reader, buf.NewWriter(conn), buf.UpdateActivity(timer))
+		return buf.Copy(link.Reader, writer, buf.UpdateActivity(timer))
 	}
 	responseFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.UplinkOnly)
-		if target.Network == net.Network_UDP {
-			return buf.Copy(newUoTReader(conn), link.Writer, buf.UpdateActivity(timer))
-		}
-		return buf.Copy(buf.NewReader(conn), link.Writer, buf.UpdateActivity(timer))
+		return buf.Copy(reader, link.Writer, buf.UpdateActivity(timer))
 	}
 
 	responseDonePost := task.OnSuccess(responseFunc, task.Close(link.Writer))
@@ -200,6 +215,7 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 		Header: make(http.Header),
 		Host:   target.NetAddr(),
 	}
+	req = req.WithContext(ctx)
 
 	if user != nil && user.Account != nil {
 		account := user.Account.(*Account)
@@ -211,7 +227,7 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 		}
 	}
 
-	connectHTTP1 := func(rawConn net.Conn) (net.Conn, buf.MultiBuffer, error) {
+	connectHTTP1 := func(rawConn net.Conn, isTLS bool) (net.Conn, buf.MultiBuffer, error) {
 		if target.Network == net.Network_TCP {
 			req.Header.Set("Proxy-Connection", "Keep-Alive")
 		} else {
@@ -225,38 +241,54 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 			} else {
 				targetHost = target.Address.IP().String()
 			}
-			uriTemplate := c.uriTemplate
-			if uriTemplate == nil {
-				var err error
-				uriTemplate, err = uritemplate.New((&url.URL{
-					Scheme: "https",
-					Host:   dest.NetAddr(),
-				}).String() + "/.well-known/masque/udp/{target_host}/{target_port}/")
+			var u *url.URL
+			if c.uriTemplate == nil {
+				uriTemplate := uritemplate.MustNew("/.well-known/masque/udp/{target_host}/{target_port}/")
+				expanded, err := uriTemplate.Expand(uritemplate.Values{
+					"target_host": uritemplate.String(targetHost),
+					"target_port": uritemplate.String(target.Port.String()),
+				})
+				if err != nil {
+					return nil, nil, err
+				}
+				u, err = url.Parse(expanded)
+				if err != nil {
+					return nil, nil, err
+				}
+				if isTLS {
+					u.Scheme = "https"
+				} else {
+					u.Scheme = "http"
+				}
+				u.Host = dest.NetAddr()
+			} else {
+				expanded, err := c.uriTemplate.Expand(uritemplate.Values{
+					"target_host": uritemplate.String(targetHost),
+					"target_port": uritemplate.String(target.Port.String()),
+				})
+				if err != nil {
+					return nil, nil, err
+				}
+				u, err = url.Parse(expanded)
 				if err != nil {
 					return nil, nil, err
 				}
 			}
-			rawURL, err := uriTemplate.Expand(uritemplate.Values{
-				"target_host": uritemplate.String(targetHost),
-				"target_port": uritemplate.String(target.Port.String()),
-			})
-			if err != nil {
-				return nil, nil, err
-			}
-			u, err := url.Parse(rawURL)
-			if err != nil {
-				return nil, nil, err
-			}
 			req.URL = u
 			req.Host = u.Host
 		}
-
-		if target.Network != net.Network_TCP || !writeFirstPayloadInH1 {
+		switch {
+		case target.Network != net.Network_TCP:
+			err := req.WriteProxy(rawConn)
+			if err != nil {
+				return nil, nil, err
+			}
+		case !writeFirstPayloadInH1:
 			err := req.Write(rawConn)
 			if err != nil {
 				return nil, nil, err
 			}
-		} else {
+		default:
 			buffer := bytes.NewBuffer(nil)
 			err := req.Write(buffer)
 			if err != nil {
@@ -276,18 +308,17 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 		if err != nil {
 			return nil, nil, err
 		}
-
 		if target.Network == net.Network_TCP {
-			if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode < 200 || resp.StatusCode > 299 {
 				resp.Body.Close()
-				return nil, nil, newError("Proxy responded with non 200 code: " + resp.Status)
+				return nil, nil, newError("Proxy responded with non 2xx code: " + resp.Status)
 			}
 		} else {
 			if resp.StatusCode != http.StatusSwitchingProtocols {
 				resp.Body.Close()
-				return nil, nil, newError("Proxy responded with non 200 code: " + resp.Status)
+				return nil, nil, newError("Proxy responded with non 101 code: " + resp.Status)
 			}
-			if resp.Header.Get("Connection") != "Upgrade" {
+			if !strings.EqualFold(resp.Header.Get("Connection"), "Upgrade") {
 				resp.Body.Close()
 				return nil, nil, newError("invalid response \"Connection\" header")
 			}
@@ -296,7 +327,6 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 				return nil, nil, newError("invalid response \"Upgrade\" header")
 			}
 		}
-
 		if bufferedReader.Buffered() > 0 {
 			payload, err := buf.ReadFrom(io.LimitReader(bufferedReader, int64(bufferedReader.Buffered())))
 			if err != nil {
@@ -309,90 +339,76 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 		return rawConn, nil, nil
 	}
 
-	connectHTTP2 := func(h2clientConn *http2ClientConn, elem *list.Element) (net.Conn, error) {
+	connectHTTP2 := func(h2clientConn *http2ClientConn) (net.Conn, bool, error) {
 		if target.Network != net.Network_TCP {
+			req.Header.Set(":protocol", "connect-udp")
+			req.Header.Set("capsule-protocol", "?1")
 			var targetHost string
 			if target.Address.Family().IsDomain() {
 				targetHost = target.Address.Domain()
 			} else {
 				targetHost = target.Address.IP().String()
 			}
-			uriTemplate := c.uriTemplate
-			if uriTemplate == nil {
-				var err error
-				uriTemplate, err = uritemplate.New((&url.URL{
-					Host: dest.NetAddr(),
-				}).String() + "/.well-known/masque/udp/{target_host}/{target_port}/")
+			var u *url.URL
+			if c.uriTemplate == nil {
+				uriTemplate := uritemplate.MustNew("/.well-known/masque/udp/{target_host}/{target_port}/")
+				expanded, err := uriTemplate.Expand(uritemplate.Values{
+					"target_host": uritemplate.String(targetHost),
+					"target_port": uritemplate.String(target.Port.String()),
+				})
 				if err != nil {
-					return nil, err
+					return nil, false, err
+				}
+				u, err = url.Parse(expanded)
+				if err != nil {
+					return nil, false, err
+				}
+				u.Scheme = "https"
+				u.Host = dest.NetAddr()
+			} else {
+				expanded, err := c.uriTemplate.Expand(uritemplate.Values{
+					"target_host": uritemplate.String(targetHost),
+					"target_port": uritemplate.String(target.Port.String()),
+				})
+				if err != nil {
+					return nil, false, err
+				}
+				u, err = url.Parse(expanded)
+				if err != nil {
+					return nil, false, err
 				}
 			}
-			rawURL, err := uriTemplate.Expand(uritemplate.Values{
-				"target_host": uritemplate.String(targetHost),
-				"target_port": uritemplate.String(target.Port.String()),
-			})
-			if err != nil {
-				return nil, err
-			}
-			u, err := url.Parse(rawURL)
-			if err != nil {
-				return nil, err
-			}
 			req.URL = u
-			req.URL.Host = u.Host
-			req.Header.Set(":protocol", "connect-udp")
-			req.Header.Set("capsule-protocol", "?1")
+			req.Host = u.Host
 		}
-
 		pr, pw := io.Pipe()
 		req.Body = pr
-
 		var pErr error
 		var wg sync.WaitGroup
 		wg.Add(1)
-
 		go func() {
 			if target.Network == net.Network_TCP {
 				_, pErr = pw.Write(firstPayload)
 			}
 			wg.Done()
 		}()
-
 		resp, err := h2clientConn.RoundTrip(req) // nolint: bodyclose
 		if err != nil {
 			if strings.Contains(err.Error(), "extended connect not supported") {
-				return nil, newError("extended connect not supported")
+				return nil, false, newError("extended connect not supported")
 			}
-			h2clientConn.Close()
-			if elem != nil {
-				c.cachedH2Mutex.Lock()
-				if cachedH2Conn, found := c.cachedH2Conns[dest]; found {
-					cachedH2Conn.Remove(elem)
-				}
-				c.cachedH2Mutex.Unlock()
-			}
-			return nil, err
+			return nil, true, err
 		}
-
 		wg.Wait()
 		if pErr != nil {
 			resp.Body.Close()
-			h2clientConn.Close()
-			if elem != nil {
-				c.cachedH2Mutex.Lock()
-				if cachedH2Conn, found := c.cachedH2Conns[dest]; found {
-					cachedH2Conn.Remove(elem)
-				}
-				c.cachedH2Mutex.Unlock()
-			}
-			return nil, pErr
+			return nil, true, pErr
 		}
-
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			resp.Body.Close()
-			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
+			return nil, false, newError("Proxy responded with non 2xx code: " + resp.Status)
 		}
-		return newHTTP2Conn(pw, resp.Body), nil
+		return newHTTP2Conn(pw, resp.Body), false, nil
 	}
 
 	c.cachedH2Mutex.Lock()
@@ -403,19 +419,28 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 	c.cachedH2Mutex.Unlock()
 
 	if elem != nil {
-		if h2ClientConn := elem.Value.(*http2ClientConn); h2ClientConn.CanTakeNewRequest() {
-			proxyConn, err := connectHTTP2(h2ClientConn, elem)
+		h2ClientConn := elem.Value.(*http2ClientConn)
+		if h2ClientConn.CanTakeNewRequest() {
+			proxyConn, shouldClose, err := connectHTTP2(h2ClientConn)
+			if shouldClose {
+				c.cachedH2Mutex.Lock()
+				if _, found := c.cachedH2Conns[dest]; found {
+					c.cachedH2Conns[dest].Remove(elem)
+				}
+				c.cachedH2Mutex.Unlock()
+				h2ClientConn.Close()
+			}
 			if err != nil {
 				return nil, nil, err
 			}
 			return proxyConn, nil, nil
 		} else {
-			h2ClientConn.Close()
 			c.cachedH2Mutex.Lock()
 			if _, found := c.cachedH2Conns[dest]; found {
 				c.cachedH2Conns[dest].Remove(elem)
 			}
 			c.cachedH2Mutex.Unlock()
+			h2ClientConn.Close()
 		}
 	}
 
@@ -430,7 +455,9 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 	}
 
 	nextProto := ""
+	var isTLS bool
 	if connALPNGetter, ok := iConn.(security.ConnectionApplicationProtocol); ok {
+		isTLS = true
 		nextProto, err = connALPNGetter.GetConnectionApplicationProtocol()
 		if err != nil {
 			rawConn.Close()
@@ -440,33 +467,33 @@ func (c *Client) setupHTTPTunnel(ctx context.Context, dest net.Destination, targ
 
 	switch nextProto {
 	case "", "http/1.1":
-		conn, mb, err := connectHTTP1(rawConn)
+		conn, mb, err := connectHTTP1(rawConn, isTLS)
 		if err != nil {
 			rawConn.Close()
 			return nil, nil, err
 		}
 		return conn, mb, nil
 	case "h2":
-		h2clientConn, err := c.transport.NewClientConn(rawConn)
+		cc, err := c.transport.NewClientConn(rawConn)
 		if err != nil {
 			rawConn.Close()
 			return nil, nil, err
 		}
-
-		h2ClientConnWrapper := newH2ClientConn(h2clientConn)
-
-		proxyConn, err := connectHTTP2(h2ClientConnWrapper, nil)
-		if err != nil {
-			return nil, nil, err
-		}
-
+		h2ClientConn := newH2ClientConn(cc)
 		c.cachedH2Mutex.Lock()
 		if _, found := c.cachedH2Conns[dest]; !found {
 			c.cachedH2Conns[dest] = &list.List{}
 		}
-		c.cachedH2Conns[dest].PushFront(h2ClientConnWrapper)
+		c.cachedH2Conns[dest].PushFront(h2ClientConn)
 		c.cachedH2Mutex.Unlock()
-
+		proxyConn, shouldClose, err := connectHTTP2(h2ClientConn)
+		if shouldClose {
+			h2ClientConn.Close()
+			rawConn.Close()
+		}
+		if err != nil {
+			return nil, nil, err
+		}
 		return proxyConn, nil, err
 	default:
 		rawConn.Close()
