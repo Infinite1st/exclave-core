@@ -8,26 +8,26 @@ require (
 	github.com/anytls/sing-anytls v0.0.13
 	github.com/apernet/quic-go v0.65.1-0.20261109005002-2895f039137a
 	github.com/dgryski/go-camellia v0.0.0-20191119043421-69a8a13fb23d
-	github.com/enfein/mieru/v3 v3.39.0
-	github.com/exclavenetwork/hysteria/core/v2 v2.13.0-1
-	github.com/exclavenetwork/hysteria/extras/v2 v2.13.0-1
-	github.com/exclavenetwork/reality v0.0.0-20261109173840-a4b5d3c18d9a
+	github.com/enfein/mieru/v3 v3.40.0
+	github.com/exclavenetwork/hysteria/core/v2 v2.14.0-1
+	github.com/exclavenetwork/hysteria/extras/v2 v2.14.0-1
+	github.com/exclavenetwork/reality v0.0.0-20261125094517-c9ff566005b7
 	github.com/exclavenetwork/sing-juicity v0.3.1
 	github.com/exclavenetwork/sing-shadowquic v0.0.0-20261109112126-ace0c2eed158
 	github.com/golang-collections/go-datastructures v0.0.0-20150211160725-59788d5eb259
 	github.com/golang/protobuf v1.5.4
 	github.com/google/go-cmp v0.7.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/miekg/dns v1.1.73
 	github.com/pires/go-proxyproto v0.16.0
-	github.com/quic-go/quic-go v0.65.0
-	github.com/refraction-networking/utls v1.8.3-0.20261108164504-a13c59ffe98b
-	github.com/sagernet/sing v0.9.6
-	github.com/sagernet/sing-mux v0.3.9
-	github.com/sagernet/sing-quic v0.7.1
-	github.com/sagernet/sing-shadowsocks v0.2.8
-	github.com/sagernet/sing-shadowsocks2 v0.2.1
-	github.com/sagernet/sing-snell v0.0.0-20261110094602-04667b0a321c
+	github.com/quic-go/quic-go v0.66.0
+	github.com/refraction-networking/utls v1.8.3-0.20261118233537-360383f893fb
+	github.com/sagernet/sing v0.9.7-0.20261125120655-610c8699131b
+	github.com/sagernet/sing-mux v0.3.10-0.20261125130604-6c5b46f55eeb
+	github.com/sagernet/sing-quic v0.7.2-0.20261124143824-14ca3448d44b
+	github.com/sagernet/sing-shadowsocks v0.2.9-0.20260929204512-65740e0f0e3e
+	github.com/sagernet/sing-shadowsocks2 v0.2.2-0.20261110092058-52ade8ab7e95
+	github.com/sagernet/sing-snell v0.0.0-20261125120456-6dfe590430a8
 	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771
 	github.com/stretchr/testify v1.12.1
 	github.com/v2fly/BrowserBridge v0.0.0-20210430233438-0570fc1d7d08
@@ -36,8 +36,8 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	go.uber.org/mock v0.6.0
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
-	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.62.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee
@@ -45,7 +45,7 @@ require (
 	google.golang.org/protobuf v1.36.12
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 	h12.io/socks v1.0.3
-	lukechampine.com/blake3 v1.4.1
+	lukechampine.com/blake3 v1.5.3
 )
 
 require (
@@ -54,7 +54,7 @@ require (
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
-	github.com/klauspost/compress v1.20.4 // indirect
+	github.com/klauspost/compress v1.20.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
 	github.com/lunixbochs/struc v0.0.0-20241101090106-8d528fa2c543 // indirect
 	github.com/metacubex/cpu v0.1.2 // indirect
@@ -64,14 +64,15 @@ require (
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/randv2 v0.2.1-0.20260726125100-81aa96a9b1a5 // indirect
-	github.com/metacubex/utls v1.8.8 // indirect
+	github.com/metacubex/utls v1.9.0-alpha.1 // indirect
 	github.com/molecule-man/go-brrr v1.3.1 // indirect
-	github.com/pion/transport/v5 v5.1.5 // indirect
+	github.com/pion/transport/v5 v5.1.6 // indirect
+	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3 // indirect
-	github.com/sagernet/quic-go v0.61.0-sing-box-mod.13 // indirect
+	github.com/sagernet/quic-go v0.61.0-sing-box-mod.15 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
-	github.com/xtaci/smux v1.5.59 // indirect
+	github.com/xtaci/smux v1.5.62 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
 	golang.org/x/text v0.44.0 // indirect
